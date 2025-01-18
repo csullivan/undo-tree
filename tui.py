@@ -12,7 +12,6 @@ class Graph:
         self.nodes = {}
         self.edges = []
         self.current_node = None
-        # We'll store an optional "selected_edge" to highlight
         self.selected_edge = None
 
     def add_node(self, node_id):
@@ -28,11 +27,6 @@ class Graph:
 
 
 def build_adjacency_list(edges):
-    """
-    Return two dicts:
-      children_map: node -> list of children
-      parents_map: node -> list of parents
-    """
     children_map = collections.defaultdict(list)
     parents_map = collections.defaultdict(list)
     for src, dst in edges:
@@ -43,24 +37,14 @@ def build_adjacency_list(edges):
 
 def layout_balanced_tree(graph, root, x=0, y=0, 
                          x_spacing=3, y_spacing=2):
-    """
-    Recursively lay out the subtree rooted at 'root' in a 
-    balanced, centered-above-children way.
-
-    Returns the 'width' of the entire subtree for root.
-    """
-    # We rebuild adjacency inside because we may call this function recursively
     children_map, _ = build_adjacency_list(graph.edges)
     children = children_map[root]
-    # Sorting children is optional, ensures stable ordering
     children.sort()
 
-    # If no children, just place the node at (x, y)
     if not children:
         graph.nodes[root] = (x, y)
         return 1
 
-    # Otherwise, layout each child subtree
     total_width = 0
     child_positions = []
     for child in children:
@@ -71,17 +55,15 @@ def layout_balanced_tree(graph, root, x=0, y=0,
             x_spacing=x_spacing,
             y_spacing=y_spacing
         )
-        # The child's subtree center is total_width + (subtree_width/2)
         child_center_x = total_width + subtree_width / 2
         child_positions.append((child, child_center_x))
         total_width += subtree_width + x_spacing
 
-    # Remove the trailing spacing:
+    # Remove the trailing spacing
     total_width -= x_spacing
     if total_width < 1:
         total_width = 1
 
-    # Now place root so it's centered above its children
     leftmost_center = child_positions[0][1]
     rightmost_center = child_positions[-1][1]
     parent_center_x = (leftmost_center + rightmost_center) / 2
@@ -92,10 +74,6 @@ def layout_balanced_tree(graph, root, x=0, y=0,
 
 
 def choose_edge_char(r1, c1, r2, c2):
-    """
-    Determine which ASCII char to use for a line step
-    based on slope.
-    """
     if r1 == r2:
         return "-"
     elif c1 == c2:
@@ -103,17 +81,12 @@ def choose_edge_char(r1, c1, r2, c2):
     else:
         dy = r2 - r1
         dx = c2 - c1
-        # If slope is positive, use '\', else '/'
         return "\\" if (dy * dx > 0) else "/"
 
 
 def draw_line(canvas, r1, c1, r2, c2, char, height, width):
-    """
-    Draw a Bresenham line on the canvas from (r1,c1) to (r2,c2).
-    """
     x1, y1 = c1, r1
     x2, y2 = c2, r2
-
     dx = abs(x2 - x1)
     sx = 1 if x1 < x2 else -1
     dy = -abs(y2 - y1)
@@ -134,23 +107,23 @@ def draw_line(canvas, r1, c1, r2, c2, char, height, width):
             y1 += sy
 
 
-def render_graph_as_ascii(graph: Graph, selected_edge=None):
+### NEW OR MODIFIED CODE ###
+def build_full_canvas(graph: Graph, selected_edge=None):
     """
-    Convert the graph into a 2D ASCII art string.
-    Each node = 'o' or 'x' if it's the current_node.
-    If an edge == selected_edge, draw it with '*' instead of the normal ASCII chars.
+    Instead of returning a single string, build and return
+    the 2D array (list of lists of single characters) for
+    the entire graph bounding box.
     """
-    # Find the bounding box (min_x, max_x, min_y, max_y)
     xs = [pos[0] for pos in graph.nodes.values()]
     ys = [pos[1] for pos in graph.nodes.values()]
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
 
-    # Add some padding
+    # Padding
     width = int((max_x - min_x + 1) * 2 + 4)
     height = int((max_y - min_y + 1) * 2 + 4)
 
-    # Blank canvas
+    # Create blank canvas
     canvas = [[" " for _ in range(width)] for _ in range(height)]
 
     def to_canvas_coords(x, y):
@@ -164,40 +137,76 @@ def render_graph_as_ascii(graph: Graph, selected_edge=None):
         x2, y2 = graph.nodes[dst]
         r1, c1 = to_canvas_coords(x1, y1)
         r2, c2 = to_canvas_coords(x2, y2)
-
-        # Decide whether this edge is the "selected" edge
         is_selected = (selected_edge == (src, dst))
-        if is_selected:
-            # Draw with '*' (no slope shape)
-            edge_char = '*'
-        else:
-            # Normal slope-based ASCII
-            edge_char = choose_edge_char(r1, c1, r2, c2)
-
+        edge_char = '*' if is_selected else choose_edge_char(r1, c1, r2, c2)
         draw_line(canvas, r1, c1, r2, c2, edge_char, height, width)
 
-    # Place nodes
+    # Draw nodes
     for node_id, (x, y) in graph.nodes.items():
         r, c = to_canvas_coords(x, y)
         if 0 <= r < height and 0 <= c < width:
-            # Mark current node with 'x', others with 'o'
             canvas[r][c] = "x" if node_id == graph.current_node else "o"
 
-    return "\n".join("".join(row) for row in canvas)
+    return canvas
+
+
+### NEW OR MODIFIED CODE ###
+def crop_canvas_around_current_node(canvas, graph, desired_width, desired_height):
+    """
+    Safely slice out a subregion of size (desired_height x desired_width)
+    from 'canvas', centered around the 'x' node if possible.
+    """
+    full_height = len(canvas)
+    full_width = len(canvas[0]) if full_height > 0 else 0
+
+    # Find 'x' in the canvas (the current node's position)
+    row_center, col_center = None, None
+    for r in range(full_height):
+        for c in range(full_width):
+            if canvas[r][c] == 'x':
+                row_center, col_center = r, c
+                break
+        if row_center is not None:
+            break
+
+    if row_center is None or col_center is None:
+        # Fallback if no 'x' was found:
+        row_center, col_center = 0, 0
+
+    # 1) Clamp the desired view size if it's bigger than the entire canvas
+    if desired_width > full_width:
+        desired_width = full_width
+    if desired_height > full_height:
+        desired_height = full_height
+
+    # 2) Attempt to center (row_center, col_center) in that subregion
+    row_top = row_center - desired_height // 2
+    col_left = col_center - desired_width // 2
+
+    # 3) Clamp row_top/col_left so subregion is fully within the canvas
+    max_row_top = full_height - desired_height
+    max_col_left = full_width - desired_width
+    if row_top < 0:
+        row_top = 0
+    elif row_top > max_row_top:
+        row_top = max_row_top
+
+    if col_left < 0:
+        col_left = 0
+    elif col_left > max_col_left:
+        col_left = max_col_left
+
+    # 4) Build the cropped ASCII
+    cropped_rows = []
+    for r in range(row_top, row_top + desired_height):
+        row_slice = canvas[r][col_left:col_left + desired_width]
+        cropped_rows.append("".join(row_slice))
+
+    return "\n".join(cropped_rows)
+
 
 
 def create_example_graph():
-    """
-    Create a sample tree-like DAG:
-    
-       n0
-        \
-         n1
-         /|\
-        n2 n3 n4
-        /
-       ...
-    """
     g = Graph()
     for node_id in ["n0", "n1", "n2", "n3", "n4", "n5", "n6"]:
         g.add_node(node_id)
@@ -209,34 +218,19 @@ def create_example_graph():
     g.add_edge("n2", "n5")
     g.add_edge("n2", "n6")
 
-    # Lay it out
-    root = "n0"
-    layout_balanced_tree(g, root, x=0, y=0, x_spacing=4, y_spacing=3)
-
-    # Current node is n0
+    layout_balanced_tree(g, "n0", x=0, y=0, x_spacing=4, y_spacing=3)
     g.set_current_node("n0")
     return g
 
 def create_larger_example_graph():
-    """
-    Create a deterministic "larger" DAG with 20 nodes (n0..n19).
-    Each node has 1–5 children, with no merges (i.e., each node has at most one parent).
-    Uses a fixed seed so you'll always get the same structure each run.
-    """
-
-    # We'll build a list of nodes first:
     g = Graph()
     num_nodes = 20
     for i in range(num_nodes):
         g.add_node(f"n{i}")
 
-    # Use a BFS-like approach to assign children. 
-    # Each node we pop can get 1..5 children, 
-    # but we never reassign parents (no merges).
     random.seed(42)
-    queue = [0]  # start from node index 0
+    queue = [0]
     next_node = 1
-
     while queue and next_node < num_nodes:
         parent = queue.pop(0)
         children_count = random.randint(1, 5)
@@ -248,36 +242,25 @@ def create_larger_example_graph():
             else:
                 break
 
-    # For layout, treat n0 as the "root" 
-    # (strictly speaking, it's the first node we assigned children from).
     layout_balanced_tree(g, root="n0", x_spacing=4, y_spacing=3)
-
-    # Arbitrarily pick n0 as our initial "current_node."
     g.set_current_node("n0")
     return g
 
 
 def main():
-    g = create_example_graph()
+    # g = create_example_graph()
     g = create_larger_example_graph()
-    
 
-    # Build adjacency lists so we can navigate
     children_map, parents_map = build_adjacency_list(g.edges)
-
-    # Keep track of which child-index is selected for each node 
-    # (so pressing Down goes to that child).
-    # Left/Right will cycle through the available children.
     child_selection_map = collections.defaultdict(int)
 
-    # A small utility to refresh the ASCII after each keypress
+    text_widget = urwid.Text("", align='left')
+    fill = urwid.Filler(text_widget, valign='top')
+
     def update_view():
-        # Refresh the selected_edge in the graph object 
-        # based on current_node and which child is chosen
         cur = g.current_node
         c_idx = child_selection_map[cur]
         if children_map[cur]:
-            # Ensure c_idx is in range
             c_idx %= len(children_map[cur])
             child_selection_map[cur] = c_idx
             child_id = children_map[cur][c_idx]
@@ -285,12 +268,24 @@ def main():
         else:
             g.selected_edge = None
 
-        ascii_art = render_graph_as_ascii(g, selected_edge=g.selected_edge)
-        text_widget.set_text(ascii_art)
+        ### NEW OR MODIFIED CODE ###
+        # Instead of rendering a single full string, build the full canvas,
+        # then crop around the current node based on the terminal size
+        # (or you can pick a fixed size, e.g., 30x15)
+        full_canvas = build_full_canvas(g, selected_edge=g.selected_edge)
 
-    # Initial render
-    text_widget = urwid.Text(render_graph_as_ascii(g), align='left')
-    fill = urwid.Filler(text_widget, valign='top')
+        # 1) Build the full canvas
+        # Get terminal size (cols, rows)
+        cols, rows = loop.screen.get_cols_rows()
+
+        # Subtract a margin if you need to account for borders or other widgets
+        view_width = max(20, cols - 2)
+        view_height = max(10, rows - 2)
+
+        # Now safely crop around the current node:
+        ascii_art = crop_canvas_around_current_node(full_canvas, g, view_width, view_height)
+
+        text_widget.set_text(ascii_art)
 
     def handle_input(key):
         if key in ('q', 'Q', 'esc'):
@@ -298,34 +293,25 @@ def main():
 
         cur = g.current_node
 
-        # ---- Left/Right: pick which child to go down to ----
         if key == 'left':
             if children_map[cur]:
                 c_idx = child_selection_map[cur]
                 c_idx = (c_idx - 1) % len(children_map[cur])
                 child_selection_map[cur] = c_idx
-
         elif key == 'right':
             if children_map[cur]:
                 c_idx = child_selection_map[cur]
                 c_idx = (c_idx + 1) % len(children_map[cur])
                 child_selection_map[cur] = c_idx
-
-        # ---- Down: move to the selected child ----
         elif key == 'down':
             if children_map[cur]:
                 c_idx = child_selection_map[cur]
                 next_node = children_map[cur][c_idx]
                 g.set_current_node(next_node)
-
-        # ---- Up: move to the first parent (if any) ----
         elif key == 'up':
             if parents_map[cur]:
-                # Just pick the first parent for simplicity
                 parent = parents_map[cur][0]
                 g.set_current_node(parent)
-                # Optionally, set the parent's child_selection_map so that 
-                # its selected child is "cur"
                 if cur in children_map[parent]:
                     idx = children_map[parent].index(cur)
                     child_selection_map[parent] = idx
@@ -333,6 +319,7 @@ def main():
         update_view()
 
     loop = urwid.MainLoop(fill, unhandled_input=handle_input)
+    update_view()  # initial render
     loop.run()
 
 
