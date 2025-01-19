@@ -52,6 +52,7 @@ def add_node():
 
     # Link from parent
     graph["nodes"][parent_id]["children"].append(new_node_id)
+    graph["current_node_id"] = new_node_id
 
     return jsonify({
         "message": "Node created successfully",
@@ -85,27 +86,33 @@ def navigate_node():
       2. Enqueue a new pending change (node_id + delta).
     """
     data = request.json
-    target_node_id = data.get("target_node_id")
+    current_node_id = data.get("current_node_id")
+    change_node_id = data.get("target_node_id")
+    if current_node_id == change_node_id:
+        mode = "apply"
+    else:
+        mode = "revert"
 
-    if not target_node_id:
+    if not change_node_id:
         return jsonify({"error": "target_node_id is required"}), 400
 
-    if target_node_id not in graph["nodes"]:
-        return jsonify({"error": f"Node {target_node_id} does not exist"}), 404
+    if change_node_id not in graph["nodes"]:
+        return jsonify({"error": f"Node {change_node_id} does not exist"}), 404
 
     # Update current node
-    graph["current_node_id"] = target_node_id
+    graph["current_node_id"] = current_node_id
 
-    node_delta = graph["nodes"][target_node_id]["delta"]
+    node_delta = graph["nodes"][change_node_id]["delta"]
     # Enqueue a pending change
     change = {
-        "node_id": target_node_id,
-        "delta": node_delta
+        "node_id": change_node_id,
+        "delta": node_delta,
+        "mode": mode,
     }
     graph["pending_changes"].append(change)
 
     return jsonify({
-        "message": f"Current node changed to {target_node_id}. Delta queued for extension."
+        "message": f"Current node changed to {change_node_id}. Delta queued for extension."
     }), 200
 
 

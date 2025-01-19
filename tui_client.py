@@ -233,29 +233,21 @@ def fetch_and_build_graph():
 
     return g
 
-def navigate_to_node(graph, target_node, direction):
+def navigate_to_node(graph, navigate_to_node_id, change_node_id):
     """
     1) Send a request to /api/navigate to indicate we've moved to target_node.
     2) Print a local message about applying the node's delta with '+' or '-' appended.
     3) Update our local Graph's current node.
     """
-    # For demonstration, we add direction to the printed delta but do not
-    # actually modify the server's stored delta. If you want the server to do
-    # something with this symbol, you'd pass it in the JSON and update the server.
+
     try:
         # Tell the server we want to navigate to `target_node`.
-        requests.post(f"{SERVER_URL}/api/navigate", json={"target_node_id": target_node})
+        requests.post(f"{SERVER_URL}/api/navigate", json={"target_node_id": change_node_id, "current_node_id": navigate_to_node_id})
     except requests.RequestException as e:
-        print(f"[TUI] Error navigating to {target_node}: {e}")
+        print(f"[TUI] Error navigating to {change_node_id}: {e}")
         return
 
-    if direction == "+":
-        print(f"[TUI] Applying node {target_node}'s delta with '+' appended.")
-    else:
-        print(f"[TUI] Applying node {target_node}'s delta with '-' appended.")
-
-    # Locally set it
-    graph.set_current_node(target_node)
+    graph.set_current_node(navigate_to_node_id)
 
 def main():
     try:
@@ -313,13 +305,13 @@ def main():
             if children_map[cur]:
                 c_idx = child_selection_map[cur]
                 next_node = children_map[cur][c_idx]
-                navigate_to_node(g, next_node, direction="+")  # going down => '+'
+                navigate_to_node(g, next_node, next_node)  # going down => '+'
 
         elif key == 'up':
             # If multiple parents, we just pick the first (or you can cycle)
             if parents_map[cur]:
                 parent = parents_map[cur][0]
-                navigate_to_node(g, parent, direction="-")  # going up => '-'
+                navigate_to_node(g, parent, cur)  # going up => '-'
                 # Also set parent's child_selection index so that up-down toggles effectively
                 if cur in children_map[parent]:
                     idx = children_map[parent].index(cur)
