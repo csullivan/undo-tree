@@ -36,8 +36,9 @@ def poll_and_apply_changes():
         for ch in changes:
             node_id = ch["node_id"]
             delta = ch["delta"]
+            mode = ch["mode"]
             # Simulate "applying" the delta in the editor
-            print(f"[Extension] Applying change for node {node_id} with delta: {delta}")
+            print(f"[Extension] {mode.capitalize()}ing change for node {node_id} with delta: {delta}")
             node_ids.append(node_id)
 
         # Acknowledge them all at once
@@ -74,7 +75,11 @@ def main():
     n2 = create_node(n1, " How")
     n3 = create_node(n2, " are")
     n4 = create_node(n3, " you?")
-
+    n5 = create_node(n2, " do")
+    n6 = create_node(n5, " you")
+    n7 = create_node(n6, " like")
+    n8 = create_node(n7, " your")
+    n9 = create_node(n8, " tea?")
     print("\n--- Finished creating sample nodes. ---\n")
 
     # 4) Start polling loop
@@ -83,7 +88,7 @@ def main():
         while True:
             poll_and_apply_changes()
             # Sleep a bit between polls
-            time.sleep(1)
+            time.sleep(0.5)
     except KeyboardInterrupt:
         print("\n[Extension] Stopped polling. Exiting...")
 
