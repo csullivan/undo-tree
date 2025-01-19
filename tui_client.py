@@ -2,8 +2,10 @@ import urwid
 import collections
 import random
 import requests
+import argparse
 
 SERVER_URL = "http://localhost:5000"
+FILE_ID = "default"  # will be overridden by --file_id
 
 class Graph:
     """
@@ -202,10 +204,10 @@ def crop_canvas_around_current_node(canvas, graph, desired_width, desired_height
 
 def fetch_and_build_graph():
     """
-    Fetch the current graph from /api/graph and build a Graph() object
-    we can render with ASCII art.
+    Fetch the current graph from /api/graph for the chosen FILE_ID
+    and build a Graph() object we can render with ASCII art.
     """
-    resp = requests.get(f"{SERVER_URL}/api/graph")
+    resp = requests.get(f"{SERVER_URL}/api/graph?file_id={FILE_ID}")
     if resp.status_code != 200:
         raise RuntimeError(f"Failed to fetch graph: {resp.status_code} {resp.text}")
     data = resp.json()  # { "nodes": { "node_id": {...}, ... }, "current_node_id": "..." }
@@ -235,14 +237,17 @@ def fetch_and_build_graph():
 
 def navigate_to_node(graph, navigate_to_node_id, change_node_id):
     """
-    1) Send a request to /api/navigate to indicate we've moved to target_node.
-    2) Print a local message about applying the node's delta with '+' or '-' appended.
-    3) Update our local Graph's current node.
+    1) Send a request to /api/navigate for FILE_ID
+    2) Update our local Graph's current node
     """
-
     try:
-        # Tell the server we want to navigate to `target_node`.
-        requests.post(f"{SERVER_URL}/api/navigate", json={"target_node_id": change_node_id, "current_node_id": navigate_to_node_id})
+        # Tell the server we want to navigate
+        payload = {
+            "file_id": FILE_ID,
+            "target_node_id": change_node_id,
+            "current_node_id": navigate_to_node_id
+        }
+        requests.post(f"{SERVER_URL}/api/navigate", json=payload)
     except requests.RequestException as e:
         print(f"[TUI] Error navigating to {change_node_id}: {e}")
         return
@@ -250,6 +255,14 @@ def navigate_to_node(graph, navigate_to_node_id, change_node_id):
     graph.set_current_node(navigate_to_node_id)
 
 def main():
+    # Parse --file_id from command line (default: "default")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--file_id", default="default", help="File ID to visualize")
+    args = parser.parse_args()
+
+    global FILE_ID
+    FILE_ID = args.file_id
+
     try:
         g = fetch_and_build_graph()
     except RuntimeError as e:
