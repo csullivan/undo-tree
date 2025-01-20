@@ -1,0 +1,42 @@
+{
+	"name": "UndoTreeExtension",
+	"displayName": "undo-tree",
+	"description": "Chris Sullivan's undo-tree extension",
+	"version": "0.0.1",
+	"publisher": "chris-sullivan",
+	"repository": "https://github.com/csullivan/undo-tree",
+	"engines": {
+		"vscode": "^1.74.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"main": "./out/extension.js",
+	"activationEvents": [
+		"*"
+	],
+	"contributes": {
+		"commands": [
+		],
+		"keybindings": [
+		]
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"lint": "eslint \"src/**/*.ts\"",
+		"watch": "tsc -watch -p ./"
+	},
+	"devDependencies": {
+		"@types/node": "^16.11.7",
+		"@types/node-fetch": "^2.6.4",
+		"@types/vscode": "^1.73.0",
+		"@typescript-eslint/eslint-plugin": "^5.42.0",
+		"@typescript-eslint/parser": "^5.42.0",
+		"eslint": "^8.26.0",
+		"typescript": "^5.0.2"
+	},
+	"dependencies": {
+		"node-fetch": "^2.6.11"
+	}
+}
