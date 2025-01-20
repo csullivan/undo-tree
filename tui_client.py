@@ -1,6 +1,5 @@
 import urwid
 import collections
-import random
 import requests
 import argparse
 
@@ -202,37 +201,33 @@ def crop_canvas_around_current_node(canvas, graph, desired_width, desired_height
 
     return "\n".join(cropped_rows)
 
-def fetch_and_build_graph():
+def fetch_graph_json():
     """
-    Fetch the current graph from /api/graph for the chosen FILE_ID
-    and build a Graph() object we can render with ASCII art.
+    Fetch the raw JSON for the current graph from /api/graph.
+    We return the JSON dictionary (not yet turned into a Graph object).
     """
     resp = requests.get(f"{SERVER_URL}/api/graph?file_id={FILE_ID}")
     if resp.status_code != 200:
         raise RuntimeError(f"Failed to fetch graph: {resp.status_code} {resp.text}")
-    data = resp.json()  # { "nodes": { "node_id": {...}, ... }, "current_node_id": "..." }
+    return resp.json()
 
+def build_graph_from_json(data):
+    """
+    Given the JSON from /api/graph, build and return a Graph() object.
+    """
     g = Graph()
-
-    # 1) Create all nodes in the local TUI structure
+    # 1) Create all nodes
     for node_id in data["nodes"].keys():
         g.add_node(node_id)
 
-    # 2) Create edges from each node to its children
+    # 2) Create edges
     for node_id, info in data["nodes"].items():
         for child_id in info["children"]:
             g.add_edge(node_id, child_id)
 
-    # 3) Pick a "root" for the layout algorithm
-    #    If there's a "root" node, we use that. Otherwise, we use current_node_id.
+    # 3) Pick a layout root
     root_id = "root" if "root" in data["nodes"] else data["current_node_id"]
-
-    # Layout the nodes for ASCII display
     layout_balanced_tree(g, root_id, x=0, y=0, x_spacing=4, y_spacing=3)
-
-    # 4) Mark the server's current node as TUI current node
-    g.set_current_node(data["current_node_id"])
-
     return g
 
 def navigate_to_node(graph, navigate_to_node_id, change_node_id):
@@ -241,7 +236,6 @@ def navigate_to_node(graph, navigate_to_node_id, change_node_id):
     2) Update our local Graph's current node
     """
     try:
-        # Tell the server we want to navigate
         payload = {
             "file_id": FILE_ID,
             "target_node_id": change_node_id,
@@ -263,76 +257,161 @@ def main():
     global FILE_ID
     FILE_ID = args.file_id
 
+    # Attempt initial fetch
     try:
-        g = fetch_and_build_graph()
+        initial_data = fetch_graph_json()
     except RuntimeError as e:
         print(f"Error initializing TUI: {e}")
         return
 
-    # Build adjacency maps for quick navigation
-    children_map, parents_map = build_adjacency_list(g.edges)
-    child_selection_map = collections.defaultdict(int)
+    # Build initial local Graph
+    g = build_graph_from_json(initial_data)
+
+    # Optionally, use the server's current node, or pick your own:
+    try:
+        g.set_current_node(initial_data["current_node_id"])
+    except ValueError:
+        # If current_node_id doesn't exist for some reason, just pick one
+        if g.nodes:
+            g.set_current_node(next(iter(g.nodes)))
+
+    # Prepare TUI data
+    user_data = {
+        'graph': g,
+        'children_map': {},
+        'parents_map': {},
+        'child_selection_map': collections.defaultdict(int),
+        'last_server_data': initial_data,  # store the initial JSON
+    }
+
+    user_data['children_map'], user_data['parents_map'] = build_adjacency_list(g.edges)
 
     text_widget = urwid.Text("", align='left')
     fill = urwid.Filler(text_widget, valign='top')
 
     def update_view():
-        cur = g.current_node
-        c_idx = child_selection_map[cur]
-        if children_map[cur]:
-            c_idx %= len(children_map[cur])
-            child_selection_map[cur] = c_idx
-            child_id = children_map[cur][c_idx]
-            g.selected_edge = (cur, child_id)
+        cur_graph = user_data['graph']
+        cur = cur_graph.current_node
+        c_map = user_data['children_map']
+        if cur not in c_map:
+            cur_children = []
         else:
-            g.selected_edge = None
+            cur_children = c_map[cur]
 
-        full_canvas = build_full_canvas(g, selected_edge=g.selected_edge)
-        # Attempt to use the terminal size (or fallback to some minimal)
+        # If there are children, highlight selected child edge
+        if cur_children:
+            c_idx = user_data['child_selection_map'][cur] % len(cur_children)
+            user_data['child_selection_map'][cur] = c_idx
+            child_id = cur_children[c_idx]
+            cur_graph.selected_edge = (cur, child_id)
+        else:
+            cur_graph.selected_edge = None
+
+        # Build full canvas
+        full_canvas = build_full_canvas(cur_graph, selected_edge=cur_graph.selected_edge)
         cols, rows = loop.screen.get_cols_rows()
         view_width = max(20, cols - 2)
         view_height = max(10, rows - 2)
 
-        ascii_art = crop_canvas_around_current_node(full_canvas, g, view_width, view_height)
+        ascii_art = crop_canvas_around_current_node(full_canvas, cur_graph, view_width, view_height)
         text_widget.set_text(ascii_art)
 
     def handle_input(key):
+        cur_graph = user_data['graph']
+        children_map = user_data['children_map']
+        parents_map = user_data['parents_map']
+        child_selection_map = user_data['child_selection_map']
+
         if key in ('q', 'Q', 'esc'):
             raise urwid.ExitMainLoop()
 
-        cur = g.current_node
+        cur = cur_graph.current_node
 
         if key == 'left':
-            if children_map[cur]:
+            if cur in children_map and children_map[cur]:
                 c_idx = child_selection_map[cur]
                 c_idx = (c_idx - 1) % len(children_map[cur])
                 child_selection_map[cur] = c_idx
 
         elif key == 'right':
-            if children_map[cur]:
+            if cur in children_map and children_map[cur]:
                 c_idx = child_selection_map[cur]
                 c_idx = (c_idx + 1) % len(children_map[cur])
                 child_selection_map[cur] = c_idx
 
         elif key == 'down':
-            if children_map[cur]:
+            if cur in children_map and children_map[cur]:
                 c_idx = child_selection_map[cur]
                 next_node = children_map[cur][c_idx]
-                navigate_to_node(g, next_node, next_node)  # going down => '+'
+                navigate_to_node(cur_graph, next_node, next_node)
 
         elif key == 'up':
-            # If multiple parents, we just pick the first (or you can cycle)
-            if parents_map[cur]:
+            if cur in parents_map and parents_map[cur]:
                 parent = parents_map[cur][0]
-                navigate_to_node(g, parent, cur)  # going up => '-'
-                # Also set parent's child_selection index so that up-down toggles effectively
-                if cur in children_map[parent]:
+                navigate_to_node(cur_graph, parent, cur)
+                # Also update parent's selection index so up/down toggles effectively
+                if parent in children_map and cur in children_map[parent]:
                     idx = children_map[parent].index(cur)
                     child_selection_map[parent] = idx
 
         update_view()
 
     loop = urwid.MainLoop(fill, unhandled_input=handle_input)
+
+    def poll_server(loop_ref, user_data_ref):
+        """
+        Periodically poll the server for graph changes. Only rebuild the Graph
+        if the new JSON differs from our last_server_data. If the current node
+        is missing from the new data, raise an error.
+        """
+        try:
+            new_data = fetch_graph_json()
+
+            # Compare new_data with last_server_data
+            if new_data != user_data_ref['last_server_data']:
+                # They differ => do the expensive rebuild
+                new_g = build_graph_from_json(new_data)
+
+                old_current = user_data_ref['graph'].current_node
+                # Check if our current node is in the new Graph
+                if old_current not in new_g.nodes:
+                    raise ValueError(f"Current node '{old_current}' is no longer in the server graph!")
+
+                # Set the current node in the newly built graph
+                new_g.set_current_node(new_data["current_node_id"])
+
+                # Update TUI references
+                user_data_ref['graph'] = new_g
+                new_children_map, new_parents_map = build_adjacency_list(new_g.edges)
+                user_data_ref['children_map'] = new_children_map
+                user_data_ref['parents_map'] = new_parents_map
+
+                # Merge child_selection_map so old selection indices carry over if possible
+                old_child_map = user_data_ref['child_selection_map']
+                new_child_map = collections.defaultdict(int)
+                for node_id in new_children_map.keys():
+                    if node_id in old_child_map:
+                        new_child_map[node_id] = old_child_map[node_id]
+                user_data_ref['child_selection_map'] = new_child_map
+
+                # Save the new data as "last_server_data"
+                user_data_ref['last_server_data'] = new_data
+
+                # Re-render after rebuilding
+                update_view()
+
+        except Exception as e:
+            print(f"[TUI] Polling error: {e}")
+            # Optionally exit TUI:
+            # raise urwid.ExitMainLoop()
+
+        finally:
+            # Schedule the next poll in N seconds
+            loop_ref.set_alarm_in(2, poll_server, user_data_ref)
+
+    # Start the periodic polling
+    loop.set_alarm_in(2, poll_server, user_data)
+
     update_view()
     loop.run()
 
