@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import fetch from 'node-fetch';  // If you're on Node 18+ with ESM, you can use globalThis.fetch.
+import { diff_match_patch, DIFF_INSERT, DIFF_DELETE, patch_obj } from 'diff-match-patch';
 
 const SERVER_URL = "http://localhost:5000"; // or use a setting or environment variable
 
@@ -7,58 +8,61 @@ console.log(`[Extension] Hello from undo-tree!`);
 
 interface PendingChange {
     node_id: string;
-    delta: string;
-    mode: string; // "apply", "insert", or "delete" - depends on your server logic
+    delta: string; // This will be the patch text from diff_match_patch.patch_toText(...)
+    mode: string;  // "apply" or "revert" or your custom modes
 }
 
 interface FileState {
     fileId: string;
-    content: string;
-    parentNodeId: string;      // track the "current" node in the server’s graph
+    content: string;           // The local content snapshot
+    parentNodeId: string;      // The current node in the server’s graph
     lastDeltaSendTime?: number;
     pendingDelta?: string;
     sendTimer?: NodeJS.Timeout;
 }
 
+// Keep track of open file states
 const fileStates = new Map<string, FileState>();
 
-// How often (in ms) we poll the server for incoming changes.
+// How often (in ms) we poll the server for incoming changes
 const POLL_INTERVAL = 300;
 // How long (in ms) after typing stops do we consider a "batch" of edits done?
 // TODO(csullivan): Consider eventually changing this to measure a batch as a
 // period of changes made over a short interval
 const DELTA_BATCH_INTERVAL = 1000;
 
+// Create a single instance of diff_match_patch to use everywhere
+const dmp = new diff_match_patch();
+
 export function activate(context: vscode.ExtensionContext) {
-    console.log(`[Extension] Hello from activate!`);
-    // Set up an interval to poll the server for changes to *any* open files.
+    console.log(`[Extension] Activated!`);
+
+    // 1) Poll the server on an interval
     const poller = setInterval(() => {
-        console.log(`[Extension] polling!`);
+        // For each open file, poll for changes
         for (const state of fileStates.values()) {
             pollAndApplyChanges(state).catch(err =>
                 console.error("[Extension] Error polling for changes:", err)
             );
         }
     }, POLL_INTERVAL);
-
     context.subscriptions.push({ dispose: () => clearInterval(poller) });
 
-    // When a text document is opened, we init its state (snapshot content).
-    // This also covers newly opened or newly created documents.
+    // 2) On opening a text document, initialize our state
     vscode.workspace.onDidOpenTextDocument(doc => {
         if (doc.uri.scheme === 'file') {
             initializeFileState(doc);
         }
     }, null, context.subscriptions);
 
-    // If the extension is activated with a file already open, initialize for those
+    // Also initialize state for already-open documents
     vscode.workspace.textDocuments.forEach(doc => {
         if (doc.uri.scheme === 'file') {
             initializeFileState(doc);
         }
     });
 
-    // Listen for text changes
+    // 3) Listen for text changes
     vscode.workspace.onDidChangeTextDocument(event => {
         if (event.document.uri.scheme !== 'file') {
             return;
@@ -69,11 +73,11 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        // The easiest approach: store the entire new text as "pendingDelta".
-        // A more advanced approach might compute a minimal diff from state.content to doc.getText().
+        // Store the *entire* new text in pendingDelta for now,
+        // but we'll compute and send a patch in sendDeltaToServer below.
         state.pendingDelta = doc.getText();
 
-        // Restart the send timer to wait DELTA_BATCH_INTERVAL after last keystroke
+        // Reset or start our batch-timer
         if (state.sendTimer) {
             clearTimeout(state.sendTimer);
         }
@@ -84,9 +88,8 @@ export function activate(context: vscode.ExtensionContext) {
         }, DELTA_BATCH_INTERVAL);
     }, null, context.subscriptions);
 
-    // When the extension is deactivated or the file is closed, we might want to flush changes
+    // 4) Cleanup on close if desired
     vscode.workspace.onDidCloseTextDocument(doc => {
-        // If you want to handle closing logic, do it here
         const state = fileStates.get(doc.fileName);
         if (state?.sendTimer) {
             clearTimeout(state.sendTimer);
@@ -95,37 +98,38 @@ export function activate(context: vscode.ExtensionContext) {
     }, null, context.subscriptions);
 }
 
+export function deactivate() {
+    console.log("[Extension] Deactivated.");
+}
+
 /**
- * Initializes our internal FileState for a newly opened text document.
- * 
- * 1. Takes an initial snapshot (content).
- * 2. Creates/ensures a graph on the server for this file.
- * 3. Creates a root node or fetches existing root node for that file.
+ * Initialize FileState for a newly opened text document.
+ * - Snapshots content
+ * - Ensures a graph (or node) for this file is created on the server
  */
 async function initializeFileState(doc: vscode.TextDocument) {
     const fileName = doc.fileName;
     if (fileStates.has(fileName)) {
-        return; // Already initialized
+        return;
     }
 
     const content = doc.getText();
-    const fileId = fileName;  // For real usage, you might want to sanitize the file name or use an ID from config.
+    const fileId = fileName;  // For real usage, sanitize or customize this ID
 
     try {
-        // Step 1: Ensure the server has a graph for fileId (similar to `GET /api/graph?file_id=xyz`).
-        // Minimal example - we'll just do a GET, ignoring details.
+        // Example: ensure the server has a graph for fileId
         const graphResp = await fetch(`${SERVER_URL}/api/graph?file_id=${encodeURIComponent(fileId)}`);
         if (graphResp.status !== 200) {
             console.error(`[Extension] Error fetching/creating graph for ${fileId}:`, await graphResp.text());
             return;
         }
 
-        // For the sake of demonstration, we set the parentNodeId to "root".
-        // In reality, you might parse the server response to find or create a real root node.
+        // A simple assumption: the server can give us a 'root' or we define it:
         const parentNodeId = "root";
 
-        // Create an initial snapshot node from root if you want a distinct node for "initial content"
-        const nodeId = await createNodeOnServer(fileId, parentNodeId, content);
+        // (Optional) Create an initial snapshot node from 'root'
+        // So that there is a distinct node representing the initial file contents
+        const nodeId = await createNodeOnServer(fileId, parentNodeId, content, /*isFullContent*/ true);
         if (!nodeId) {
             console.error("[Extension] Could not create initial node for file:", fileId);
             return;
@@ -136,71 +140,77 @@ async function initializeFileState(doc: vscode.TextDocument) {
             content,
             parentNodeId: nodeId,
         };
-
         fileStates.set(fileName, fileState);
         console.log(`[Extension] Initialized file state for '${fileName}'. Node = ${nodeId}`);
-
     } catch (err) {
         console.error("[Extension] Error initializing file state:", err);
     }
 }
 
 /**
- * Sends the current 'pendingDelta' to the server, if any, and updates local state.
+ * Sends any pending changes as a diff/patch to the server,
+ * then updates our local state accordingly.
  */
 async function sendDeltaToServer(state: FileState) {
-    if (!state.pendingDelta || state.pendingDelta === state.content) {
-        // Nothing new or no changes
-        return;
-    }
-    const delta = diffText(state.content, state.pendingDelta);
-    if (!delta) {
+    const oldText = state.content;
+    const newText = state.pendingDelta;
+    // If no change or no new text, bail out
+    if (!newText || newText === oldText) {
         return;
     }
 
-    // The current parent is the last node we created.
-    const newNodeId = await createNodeOnServer(state.fileId, state.parentNodeId, delta);
+    // 1. Create a patch from old to new using diff-match-patch
+    const patchList = dmp.patch_make(oldText, newText);
+    const patchText = dmp.patch_toText(patchList);
+    if (!patchText) {
+        return;
+    }
+
+    // 2. Send this patch to the server
+    const newNodeId = await createNodeOnServer(state.fileId, state.parentNodeId, patchText);
     if (!newNodeId) {
         console.error("[Extension] createNodeOnServer failed");
         return;
     }
 
-    // Update local state
+    // 3. Update local state
     state.parentNodeId = newNodeId;
-    state.content = state.pendingDelta;
+    state.content = newText;
     state.pendingDelta = undefined;
     console.log(`[Extension] Updated parent node for file '${state.fileId}' to ${newNodeId}`);
 }
 
 /**
- * A naive "diff" method. You can replace this with something more sophisticated.
- * Currently returns the entire new text if it's different, or empty if not.
+ * Create a node on the server, posting either a patch delta or (optionally)
+ * a full snapshot if isFullContent is true.
+ *
+ * The server needs to understand which is which. One approach is to have a
+ * boolean flag or different fields. For demonstration, we're sending:
+ *   delta: The patch (or full text)
+ *   is_full_content: optional boolean
  */
-function diffText(oldText: string, newText: string): string {
-    if (oldText === newText) {
-        return "";
-    }
-    // Minimal approach: just return the entire new text
-    return newText;
-}
-
-/**
- * Creates a new node on the server, similar to create_node(...) in client.py
- */
-async function createNodeOnServer(fileId: string, parentNodeId: string, delta: string): Promise<string | null> {
+async function createNodeOnServer(
+    fileId: string, 
+    parentNodeId: string, 
+    deltaOrContent: string, 
+    isFullContent: boolean = false
+): Promise<string | null> {
     const payload = {
         file_id: fileId,
         parent_node_id: parentNodeId,
-        delta
+        delta: deltaOrContent,
+        is_full_content: isFullContent
     };
+
     const resp = await fetch(`${SERVER_URL}/api/nodes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
     });
+
     if (resp.status === 201) {
         const data = await resp.json();
-        console.log(`[Extension] Created node ${data.node_id} with delta: ${delta}`);
+        console.log(`[Extension] Created node ${data.node_id} (isFullContent=${isFullContent})`);
         return data.node_id;
     } else {
         console.error("[Extension] Error creating node:", await resp.text());
@@ -209,12 +219,12 @@ async function createNodeOnServer(fileId: string, parentNodeId: string, delta: s
 }
 
 /**
- * Poll the server for all pending changes for a given file, apply them, and acknowledge them.
+ * Called periodically to poll the server for changes (patches).
+ * If the server returns a patch with mode="revert", it means
+ * "this is the forward patch from A->B, but we want to revert B->A".
  */
 async function pollAndApplyChanges(state: FileState) {
     const url = `${SERVER_URL}/api/poll_changes?file_id=${encodeURIComponent(state.fileId)}`;
-    console.log(`[Extension] pollingAndApplyingChanges for ${encodeURIComponent(state.fileId)}`);
-
     const resp = await fetch(url);
     if (resp.status !== 200) {
         console.error(`[Extension] Unexpected status polling changes: ${resp.status} -`, await resp.text());
@@ -223,42 +233,59 @@ async function pollAndApplyChanges(state: FileState) {
 
     const changes: PendingChange[] = await resp.json();
     if (!changes || changes.length === 0) {
-        // No changes pending
-        return;
+        return; // No changes
     }
 
     const nodeIds: string[] = [];
     for (const ch of changes) {
-        // In a real scenario, you'd interpret ch.delta and ch.mode, then do actual edits in the open editor.
-        // For simplicity, we will do "replace entire content" if mode === 'apply' or something similar.
-        console.log(`[Extension] ${ch.mode}ing change for node ${ch.node_id} with delta: ${ch.delta}`);
+        // ch.delta is the forward patch text from A->B
+        const forwardPatchList: (new () => patch_obj)[] = dmp.patch_fromText(ch.delta);
 
-        // Apply the change to the open document (if it's open)
-        // We'll do a naive approach: set entire content = ch.delta
-        // This is not always correct, but demonstrates the concept.
-        const textEditor = await getOpenTextEditor(state.fileId);
-        if (textEditor) {
-            await replaceAllText(textEditor, ch.delta);
-            // Update local content
-            state.content = ch.delta;
+        let newText = state.content;
+
+        if (ch.mode === "apply") {
+            // Normal forward apply: patch_apply( forward, oldText = A ) => B
+            const [appliedText, results] = dmp.patch_apply(forwardPatchList, state.content);
+            newText = appliedText;
+
+        } else if (ch.mode === "revert") {
+            // The server only has the forward patch (A->B),
+            // but we want to go from B->A. Invert the patch first.
+            const reversedPatchList = invertPatch(forwardPatchList);
+
+            // Now apply the reversed patch to the local content (which is B)
+            const [appliedText, results] = dmp.patch_apply(reversedPatchList as unknown as (new () => patch_obj)[], state.content);
+            newText = appliedText;
+
+        } else {
+            console.log(`[Extension] Unhandled change mode: ${ch.mode}`);
+            continue;
         }
 
+        // If we got new text from the patch, replace in the editor
+        if (newText !== state.content) {
+            const textEditor = await getOpenTextEditor(state.fileId);
+            if (textEditor) {
+                await replaceAllText(textEditor, newText);
+                state.content = newText;
+            }
+        }
+
+        // Update our notion of "current node" to the server's node
         nodeIds.push(ch.node_id);
-        // Update the parent node id to the node we just applied so any 
-        // future changes will be applied to this node.
         state.parentNodeId = ch.node_id;
     }
 
-    // Acknowledge changes
-    const ackPayload = {
-        file_id: state.fileId,
-        node_ids: nodeIds
-    };
+    // Acknowledge the changes so the server knows we're up to date
     const ackResp = await fetch(`${SERVER_URL}/api/ack_changes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(ackPayload)
+        body: JSON.stringify({
+            file_id: state.fileId,
+            node_ids: nodeIds
+        })
     });
+
     if (ackResp.status === 200) {
         console.log(`[Extension] Acknowledged changes: ${nodeIds.join(", ")}`);
     } else {
@@ -267,12 +294,52 @@ async function pollAndApplyChanges(state: FileState) {
 }
 
 /**
- * Helper to get the current open TextEditor for the given fileId.
- * We are using the assumption that `fileId === fileName` in this example.
+ * Invert (reverse) a forward patch (A -> B) into its opposite (B -> A).
+ *
+ * Diff-match-patch doesn't provide a built-in "reverse patch" function,
+ * so we manually:
+ *   - swap DIFF_INSERT <-> DIFF_DELETE
+ *   - swap patch_obj.start1 <-> patch_obj.start2
+ *   - swap patch_obj.length1 <-> patch_obj.length2
+ *   - reverse the order of patch objects
+ */
+function invertPatch(forwardPatchList: (new () => patch_obj)[]): patch_obj[] {
+    // Deep-copy first, so we don't mutate the original patch
+    const reversed = dmp.patch_deepCopy(forwardPatchList) as unknown as patch_obj[];
+
+    // Reverse the order of patches because the last patch in A->B
+    // should be the first to apply in B->A
+    reversed.reverse();
+
+    // Now invert each patch's diffs and swap patch metadata
+    for (const patch of reversed) {
+        // Swap the patch range fields
+        const tmpStart = patch.start1;
+        patch.start1 = patch.start2;
+        patch.start2 = tmpStart;
+
+        const tmpLength = patch.length1;
+        patch.length1 = patch.length2;
+        patch.length2 = tmpLength;
+
+        // Invert each diff inside the patch
+        for (const diff of patch.diffs) {
+            if (diff[0] === DIFF_INSERT) {
+                diff[0] = DIFF_DELETE;
+            } else if (diff[0] === DIFF_DELETE) {
+                diff[0] = DIFF_INSERT;
+            }
+            // DIFF_EQUAL remains the same
+        }
+    }
+    return reversed;
+}
+
+/**
+ * Return an open TextEditor for the given fileId (assumed = fileName)
  */
 async function getOpenTextEditor(fileId: string): Promise<vscode.TextEditor | undefined> {
-    const editors = vscode.window.visibleTextEditors;
-    for (const ed of editors) {
+    for (const ed of vscode.window.visibleTextEditors) {
         if (ed.document.fileName === fileId) {
             return ed;
         }
@@ -281,7 +348,7 @@ async function getOpenTextEditor(fileId: string): Promise<vscode.TextEditor | un
 }
 
 /**
- * Helper to replace all text in a given TextEditor with new content.
+ * Replace all text in the given TextEditor with newContent.
  */
 async function replaceAllText(editor: vscode.TextEditor, newContent: string) {
     const doc = editor.document;
@@ -293,9 +360,4 @@ async function replaceAllText(editor: vscode.TextEditor, newContent: string) {
     await editor.edit(editBuilder => {
         editBuilder.replace(fullRange, newContent);
     });
-}
-
-export function deactivate() {
-    // Cleanup if necessary
-    console.log("[Extension] Deactivated.");
 }
