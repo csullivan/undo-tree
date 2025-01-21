@@ -16,8 +16,19 @@
 		"*"
 	],
 	"contributes": {
-		"commands": [],
-		"keybindings": []
+    "commands": [
+        {
+            "command": "undoTreeExtension.enableTracking",
+            "title": "Enable Undo Tree Tracking for Current File"
+        }
+    ],
+    "keybindings": [
+        {
+            "key": "ctrl+x u",
+            "command": "undoTreeExtension.enableTracking",
+            "when": "editorTextFocus"
+        }
+		]
 	},
 	"scripts": {
 		"vscode:prepublish": "npm run compile",

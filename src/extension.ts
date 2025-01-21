@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import fetch from 'node-fetch';  // If you're on Node 18+ with ESM, you can use globalThis.fetch.
 import { diff_match_patch, DIFF_INSERT, DIFF_DELETE, patch_obj } from 'diff-match-patch';
 
+const isOptInOnly = true; // Set to true to make tracking opt-in, false to track all files
+
 const SERVER_URL = "http://localhost:5000"; // or use a setting or environment variable
 
 console.log(`[Extension] Hello from undo-tree!`);
@@ -37,6 +39,41 @@ const dmp = new diff_match_patch();
 export function activate(context: vscode.ExtensionContext) {
     console.log(`[Extension] Activated!`);
 
+    // Register the 'enableTracking' command
+    const enableTrackingCommand = vscode.commands.registerCommand('undoTreeExtension.enableTracking', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showInformationMessage('No active editor found.');
+            return;
+        }
+
+        const doc = editor.document;
+        if (doc.uri.scheme !== 'file') {
+            vscode.window.showInformationMessage('Only file-based documents are supported.');
+            return;
+        }
+
+        const fileName = doc.fileName;
+        if (fileStates.has(fileName)) {
+            vscode.window.showInformationMessage('Undo Tree Tracking is already enabled for this file.');
+            return;
+        }
+
+        await initializeFileState(doc);
+        vscode.window.showInformationMessage(`Undo Tree Tracking enabled for ${fileName}.`);
+
+        // Run the specified command in a new terminal
+        const fileId = fileStates.get(fileName)?.fileId;
+        if (fileId) {
+            const terminal = vscode.window.createTerminal(`UndoTree-${fileId}`);
+            terminal.show();
+            // TODO(csullivan): Make this configurable
+            const command = `/home/scratch.chrsullivan_gpu/projects/undo-tree/venv-undo-tree/bin/python /home/scratch.chrsullivan_gpu/projects/undo-tree/tui_client.py --file_id ${fileId}`;
+            terminal.sendText(command);
+        }
+    });
+    context.subscriptions.push(enableTrackingCommand);
+
     // 1) Poll the server on an interval
     const poller = setInterval(() => {
         // For each open file, poll for changes
@@ -49,18 +86,20 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push({ dispose: () => clearInterval(poller) });
 
     // 2) On opening a text document, initialize our state
-    vscode.workspace.onDidOpenTextDocument(doc => {
-        if (doc.uri.scheme === 'file') {
-            initializeFileState(doc);
-        }
-    }, null, context.subscriptions);
+    if (!isOptInOnly) { // Only initialize automatically if not in opt-in mode
+        vscode.workspace.onDidOpenTextDocument(doc => {
+            if (doc.uri.scheme === 'file') {
+                initializeFileState(doc);
+            }
+        }, null, context.subscriptions);
 
-    // Also initialize state for already-open documents
-    vscode.workspace.textDocuments.forEach(doc => {
-        if (doc.uri.scheme === 'file') {
-            initializeFileState(doc);
-        }
-    });
+        // Also initialize state for already-open documents
+        vscode.workspace.textDocuments.forEach(doc => {
+            if (doc.uri.scheme === 'file') {
+                initializeFileState(doc);
+            }
+        });
+    }
 
     // 3) Listen for text changes
     vscode.workspace.onDidChangeTextDocument(event => {
