@@ -129,8 +129,10 @@ def navigate_node():
     # Decide if we are applying or reverting
     if current_node_id == change_node_id:
         mode = "apply"
+        node_id = change_node_id
     else:
         mode = "revert"
+        node_id = current_node_id
 
     # Update the current node
     graph_data["current_node_id"] = current_node_id
@@ -138,7 +140,7 @@ def navigate_node():
     node_delta = graph_data["nodes"][change_node_id]["delta"]
     # Enqueue a pending change
     change = {
-        "node_id": change_node_id,
+        "node_id": node_id,
         "delta": node_delta,
         "mode": mode,
     }
