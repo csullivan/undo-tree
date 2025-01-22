@@ -166,21 +166,13 @@ async function initializeFileState(doc: vscode.TextDocument) {
         // A simple assumption: the server can give us a 'root' or we define it:
         const parentNodeId = "root";
 
-        // (Optional) Create an initial snapshot node from 'root'
-        // So that there is a distinct node representing the initial file contents
-        const nodeId = await createNodeOnServer(fileId, parentNodeId, content, /*isFullContent*/ true);
-        if (!nodeId) {
-            console.error("[Extension] Could not create initial node for file:", fileId);
-            return;
-        }
-
         const fileState: FileState = {
             fileId,
             content,
-            parentNodeId: nodeId,
+            parentNodeId: "root",
         };
         fileStates.set(fileName, fileState);
-        console.log(`[Extension] Initialized file state for '${fileName}'. Node = ${nodeId}`);
+        console.log(`[Extension] Initialized file state for '${fileName}'. Node = root`);
     } catch (err) {
         console.error("[Extension] Error initializing file state:", err);
     }
